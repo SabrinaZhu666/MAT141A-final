@@ -1,0 +1,660 @@
+---
+title: "STA141A Final Project"
+author: "Sabrina Zhu (918586030)"
+date: "18 March, 2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = TRUE, echo = TRUE, fig.align='center')
+library(tidyverse)
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(kableExtra)
+library(caret) 
+library(ROCR)
+
+```
+
+
+# Abstract
+In this project, we analyze a subset of data about neurons in mouse brain that contributes to learning and decision process, which was collected by Steinmetz et al. (2019). Our goal in this project is to build a prediction model based on part of the data and test its performance. To understand the data structure, we do the exploratory data analysis and data integration. Then we do model training on two sessions of the data and test their performance.
+
+# Section 1: Introduction
+
+In the study conducted by Steinmetz et al. (2019), experiments were performed on a total of 10 mice over 39 sessions. Each session comprised several hundred trials, during which visual stimuli were randomly presented to the mouse on two screens positioned on both sides of it. The stimuli varied in terms of contrast levels, which took values in {0, 0.25, 0.5, 1}, with 0 indicating the absence of a stimulus. The mice were required to make decisions based on the visual stimuli, using a wheel controlled by their forepaws. A reward or penalty (i.e., feedback) was subsequently administered based on the outcome of their decisions. In particular, 
+
+- When left contrast > right contrast, success (1) if turning the wheel to the right and failure (-1) otherwise.  
+- When right contrast > left contrast, success (1) if turning the wheel to the left and failure (-1) otherwise.  
+- When both left and right contrasts are zero, success (1) if holding the wheel still and failure (-1) otherwise. 
+- When left and right contrasts are equal but non-zero, left or right will be randomly chosen (50%) as the correct choice. 
+
+The activity of the neurons in the mice's visual cortex was recorded during the trials and made available in the form of spike trains, which are collections of timestamps corresponding to neuron firing. In this project, we focus specifically on the spike trains of neurons from the onset of the stimuli to 0.4 seconds post-onset. In addition, we only use 18 sessions (Sessions 1 to 18) from four mice: Cori, Frossman, Hence, and Lederberg.
+
+
+## Data structure 
+
+---
+
+A total of 18 RDS files are provided that contain the records from 18 sessions. In each RDS file, we can find the name of mouse from `mouse_name` and date of the experiment from `date_exp`.
+
+```{r echo=TRUE, eval=TRUE}
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('./Data/session',i,'.rds',sep=''))
+}
+```
+
+Each session contains a certain number of trials, and there are six variables available for each trial, namely 
+
+- `feedback_type`: type of the feedback, 1 for success and -1 for failure
+- `contrast_left`: contrast of the left stimulus
+- `contrast_right`: contrast of the right stimulus
+- `time`: centers of the time bins for `spks`  
+- `spks`: numbers of spikes of neurons in the visual cortex in time bins defined in `time`
+- `brain_area`: area of the brain where each neuron lives
+
+
+## Question of interest
+
+The primary objective of this project is to build a predictive model to predict the outcome (i.e., feedback type) of each trial using the neural activity data (i.e., spike trains in `spks`), along with the stimuli (the left and right contrasts). Given the complexity of the data, we break the predictive modeling into three parts: Exploratory Analysis, Data Integration, and Predictive Modeling. In Section 5, we test the prediction performance on the given test sets. In Section 6, we discuss and conclude our project.
+
+# Section 2: Exploratory Analysis
+
+In this part, we will explore the features of the data sets in order to build our prediction model. In particular, we would like to (i) describe the data structures across sessions (e.g., number of neurons, number of trials, stimuli conditions, feedback types), (ii) explore the neural activities during each trial, (iii) explore the changes across trials, and (iv) explore homogeneity and heterogeneity across sessions and mice. 
+
+```{r}
+# Summarize the information across sessions:
+
+# Knowing what summary we want to report, we can create a tibble:
+# All values in this function serve only as place holders
+
+n.session=length(session)
+
+# in library tidyverse
+meta <- tibble(
+  mouse_name = rep('name',n.session),
+  n_brain_area = rep(0,n.session),
+  n_neurons = rep(0,n.session),
+  n_trials = rep(0,n.session),
+  success_rate = rep(0,n.session)
+)
+
+for(i in 1:n.session){
+  tmp = session[[i]];
+  meta[i,1]=tmp$mouse_name;
+  meta[i,2]=length(unique(tmp$brain_area));
+  meta[i,3]=dim(tmp$spks[[1]])[1];
+  meta[i,4]=length(tmp$feedback_type);
+  meta[i,5]=mean(tmp$feedback_type+1)/2;
+  }
+
+# change the column names of the table
+colnames(meta) <- c("mouse ", "brain areas ", "neurons ", "trials ", "success rate")
+
+# In package knitr
+kable(meta, caption = "data summary across session", format = "html", table.attr = "class='table table-striped'",digits=2)
+```
+The table above displays the data summary across session. There are `18` rows in total, presenting information in `18` sessions in each row. In addition, there are `5` columns contained in the table, each of which represents:
+
+- `mouse`: the name of the mouse in each session
+- `brain areas`: the number of brain areas that the neurons live in each session
+- `neurons`: the number of neurons in each session 
+- `trials`: the number of trials in each session
+- `success rate`: the rate for the mouse to make correct decisions in each session
+
+
+```{r}
+par(mfrow = c(3,6), mar= c(1,2,1,1))
+for(i in 1:18){
+  barplot(table(session[[i]]$feedback_type))
+}
+```
+
+The histograms above shows the feedback types distributions in `18` sessions. We find that there are more `1` than `-1` in each of the session, showing that there are more successful feedback than failure in the experiment.
+
+We can also explore left and right stimuli conditions distributions in each session, which are presented below.
+
+```{r}
+# left stimuli conditions distributions in each section
+par(mfrow = c(3,6), mar= c(1,2,1,1))
+for(i in 1:18){
+  barplot(table(session[[i]]$contrast_left))
+}
+```
+
+```{r}
+# right stimuli conditions distributions in each section
+par(mfrow = c(3,6), mar= c(1,2,1,1))
+for(i in 1:18){
+  barplot(table(session[[i]]$contrast_right))
+}
+```
+
+We observed that for both left and right stimuli conditions, the contrast level of `0` has largest amount in each sessions, showing that most stimuli are absent in the experiment.
+
+```{r}
+# feedback_type
+n.session=length(session) 
+
+n_success = 0
+n_trial = 0
+for(i in 1:n.session){
+    tmp = session[[i]];
+    n_trial = n_trial + length(tmp$feedback_type);
+    n_success = n_success + sum(tmp$feedback_type == 1);
+}
+n_success/n_trial
+```
+
+In `18` sessions, around 71% trials are successful overall.
+
+```{r}
+# brain area
+area = c()
+for(i in 1:n.session){
+    tmp = session[[i]];
+    area = c(area, unique(tmp$brain_area))
+}
+
+area = unique(area)
+length(area)
+```
+
+Overall, there are `62` brain areas involved in the whole experiments.
+
+### Example: Analyzing Data in Session 18
+
+We can do data analysis with any session in the dataset. Here we take session `18` as an example.
+
+We can obtain the summary of the session via _summary_ function.
+```{r}
+summary(session[[18]])
+```
+We can see that there are `216` trials in session `18`, with `1090` neurons in each trial.
+
+```{r}
+# In session 18
+i.s=18 # indicator for session
+# 1090 neurons, 216 trials
+
+# In the 1st trial
+i.t=1 # indicator for trial 
+
+spk.trial = session[[i.s]]$spks[[i.t]] 
+# row: activities of each neurons, has 1070 neurons in total; column: time bins
+
+area=session[[i.s]]$brain_area # each neuron is in one brain area
+
+# number of spikes for each neuron during this trial 
+spk.count=apply(spk.trial,1,sum) # 1: perform on rows, 2: perform on columns
+# apply sum function to the rows in spk.trial
+
+```
+
+We select the 1st trial in session `18`. `spk.count` contains `1090` values, each represents the total number of spikes for each neuron during this trial. 
+
+Next we take the average of spikes across neurons that live in the same area.
+```{r}
+# use tapply() or group_by() in dplyr
+
+# tapply():
+spk.average.tapply=tapply(spk.count, area, mean) # calculate mean spike counts for each brain area, 10 brain areas in total
+spk.average.tapply
+```
+There are `10` brain areas involved in session `18` 1st trial, and the mean spike counts for each brain area are shown above.
+
+```{r} 
+# wrap up the codes above in a function:
+# i.t: indicator for trial
+average_spike_area<-function(i.t,this_session){
+  spk.trial = this_session$spks[[i.t]]
+  area= this_session$brain_area
+  spk.count=apply(spk.trial,1,sum)
+  spk.average.tapply=tapply(spk.count, area, mean)
+  return(spk.average.tapply)
+  }
+
+# Test the function
+average_spike_area(1,this_session = session[[i.s]]) # indicator for trial/i.s: indicator for session
+
+```
+
+We wrap up the codes above in the function _average_spike_area_ to find the mean spike counts for each brain area. The input of the function are `i.t` and `this_session`, which are the indicator for trial and indicator for session, respectively. The function returns the mean spike counts for each brain area in the given session and trial. We see that the output of the function is exactly the same as what we had previously.
+
+Now we will create a data frame that contain the average spike counts for each area, feedback type, the two contrasts, and the trial id.
+```{r}
+# Extract information in the meta that we created before
+n.trial=as.numeric(meta[i.s,4]) # number of trials in the i.s session
+n.area=as.numeric(meta[i.s,2]) # number of brain areas in the i.s session
+
+trial.summary = matrix(nrow=n.trial,ncol= n.area+1+2+1) # number of brain areas + feedback type + left/right contrasts + trial id
+
+# summary for each trial in the i.s session
+for(i.t in 1:n.trial){
+  trial.summary[i.t,]=c(average_spike_area(i.t,this_session = session[[i.s]]),
+                        session[[i.s]]$feedback_type[i.t],
+                        session[[i.s]]$contrast_left[i.t],
+                        session[[i.s]]$contrast_right[i.s],
+                        i.t)
+}
+
+# add column names in the trial summary table
+colnames(trial.summary)=c(names(average_spike_area(i.t,this_session = session[[i.s]])), 'feedback', 'left contr.','right contr.','id' )
+
+# Turning it into a data frame
+trial.summary <- as_tibble(trial.summary)
+```
+
+The data frame `trial.summary` contains `216` rows, which represents `216` trials in session `18`, and `14` columns, including average spike counts for each brain area, feedback type, left and right contrasts in each trial, and the trial id from `1` to `216`.
+
+
+```{r}
+# Visualization
+area.col=rainbow(n=n.area,alpha=0.7)
+# In base R, I usually initiate a blank plot before drawing anything on it
+plot(x=1,y=0, col='white',xlim=c(0,n.trial),ylim=c(0.5,2.2), xlab="Trials",ylab="Average spike counts", main=paste("Spikes per area in Session", i.s))
+
+
+for(i in 1:n.area){
+  lines(y=trial.summary[[i]],x=trial.summary$id,col=area.col[i],lty=2,lwd=1)
+  lines(smooth.spline(trial.summary$id, trial.summary[[i]]),col=area.col[i],lwd=3)
+  }
+legend("topright", 
+  legend = colnames(trial.summary)[1:n.area], 
+  col = area.col, 
+  lty = 1, 
+  cex = 0.8
+)
+
+```
+
+We use _rainbow_ function to create the visualization of spikes per area in session 18, where it creates a vector of n contiguous colors and alpha is the transparency level. Each color represent a distinct brain area. The dashed lines present the true value of spike counts for each trial and the solid smooth splines present the average spike counts for each brain area across trials.
+
+
+# Section 3: Data Integration
+
+Using the findings in Part 1, we will propose an approach to combine data across trials by (i) extracting the shared patterns across sessions and/or (ii) addressing the differences between sessions. The goal of this part is to enable the borrowing of information across sessions to enhance the prediction performance in Part 3. 
+
+I use trials from all sessions first and see the performance. The feature I decide to use are session_id, trial_id, signals, and the average spike rate of each time bin. For each trial, I take the average of neuron spikes over each time bin and denote it as `trial_bin_average`.
+
+```{r}
+binename <- paste0("bin", as.character(1:40))
+
+get_trial_functional_data <- function(session_id, trial_id){
+  spikes <- session[[session_id]]$spks[[trial_id]]
+  if (any(is.na(spikes))){
+    disp("value missing")
+  }
+  trial_bin_average <- matrix(colMeans(spikes), nrow = 1)
+  colnames(trial_bin_average) <- binename
+  trial_tibble  = as_tibble(trial_bin_average)%>% add_column("trial_id" = trial_id) %>% add_column("contrast_left"= session[[session_id]]$contrast_left[trial_id]) %>% add_column("contrast_right"= session[[session_id]]$contrast_right[trial_id]) %>% add_column("feedback_type"= session[[session_id]]$feedback_type[trial_id])
+  trial_tibble
+}
+
+get_session_functional_data <- function(session_id){
+  n_trial <- length(session[[session_id]]$spks)
+  trial_list <- list()
+  for (trial_id in 1:n_trial){
+    trial_tibble <- get_trial_functional_data(session_id,trial_id)
+    trial_list[[trial_id]] <- trial_tibble
+  }
+  session_tibble <- as_tibble(do.call(rbind, trial_list))
+  session_tibble <- session_tibble %>% add_column("mouse_name" = session[[session_id]]$mouse_name) %>% add_column("date_exp" = session[[session_id]]$date_exp) %>% add_column("session_id" = session_id) 
+  session_tibble
+}
+```
+
+Here we create two functions. The function _get_trial_functional_data_ has two inputs: session indicator and trial indicator. The function obtains spikes in the given session and trial and compute the average spikes in each time bin, 40 bins in total. Then 40 mean spikes, trial indicator, left and right contrast and feedback type are placed into a row.
+The function _get_session_functional_data_ uses the session indicator as its output. In the given session, the function runs through all trials and obtains information via the _get_trial_functional_data_ function. The mouse name, experiment date, and session indicator are added as well.
+
+
+```{r}
+session_list = list()
+for (session_id in 1: 18){
+  session_list[[session_id]] <- get_session_functional_data(session_id)
+}
+full_functional_tibble <- as_tibble(do.call(rbind, session_list))
+full_functional_tibble$session_id <- as.factor(full_functional_tibble$session_id)
+full_functional_tibble$contrast_diff <- abs(full_functional_tibble$contrast_left-full_functional_tibble$contrast_right)
+
+full_functional_tibble$success <- full_functional_tibble$feedback_type == 1
+full_functional_tibble$success <- as.numeric(full_functional_tibble$success)
+
+predictive_feature <- c("session_id","trial_id","contrast_right","contrast_left", "contrast_diff" ,binename)
+full_functional_tibble <- full_functional_tibble[predictive_feature]
+head(full_functional_tibble)
+```
+
+We obtain information in each session via the _get_session_functional_data_ function and combine everything in the table `full_functional_tibble`. In the table, each row contains information of a particular trial. The columns contains the average spike rate for each time bin. We also add the column of `contrast_diff`, which shows the absolute value of left and right contrast in each trial.
+
+
+### Benchmark Method 1
+
+We apply Benchmark method 1 in session 1 and 18. Since the heterogeneity exists because of the differences in neurons measured in each session, we can ignore the information about specific neurons by averaging over their activities. In particular, for each trial, we can first take the summation of spikes for each neuron, which results in a vector that contains the total number of spikes for all neurons in that trial, denoted as `total.spikes`; then, we take the mean of the total number of spikes, which results in one number that is the average spike counts during that trial, denoted as `avg_spikes`.
+
+First, we create a table `dat1` for session 1. Each row contains feedback type, decision indicator, and average spikes in a trial, and there are 114 rows in total. The summary of the table `dat1` is shown below.
+
+```{r}
+# In session 1, apply benchmark method 1
+n_obs1 = length(session[[1]]$feedback_type) # number of trials in session 1
+
+dat1 = tibble(
+    feedback_type = as.factor(session[[1]]$feedback_type),
+    decision = rep('name', n_obs1),
+    avg_spikes = rep(0, n_obs1)
+)
+
+# go over each trial, 114 trials in total
+for (i in 1:n_obs1){
+    # decision 
+    if (session[[1]]$contrast_left[i] > session[[1]]$contrast_right[i]){
+        dat1$decision[i] = '1' 
+    } else if (session[[1]]$contrast_left[i] < session[[1]]$contrast_right[i]){
+        dat1$decision[i] = '2' 
+    } else if (session[[1]]$contrast_left[i] == session[[1]]$contrast_right[i] 
+               & session[[1]]$contrast_left[i] == 0){
+        dat1$decision[i] = '3' 
+    } else{
+        dat1$decision[i] = '4' 
+    }
+    
+    # avg_spks
+    spks.trial = session[[1]]$spks[[i]]
+    total.spikes = apply(spks.trial, 1, sum) # summation of spikes for each neuron
+    dat1$avg_spikes[i] = mean(total.spikes)
+}
+
+dat1$decision = as.factor(dat1$decision)
+summary(dat1)
+```
+
+Then, we do the same thing for session 18. The summary of feedback type, decision indicator, and average spikes in session 18 is shown below.
+
+```{r}
+# In session 18, apply benchmark method 1
+n_obs18 = length(session[[18]]$feedback_type) # number of trials in session 18
+
+dat18 = tibble(
+    feedback_type = as.factor(session[[18]]$feedback_type),
+    decision = rep('name', n_obs18),
+    avg_spikes = rep(0, n_obs18)
+)
+
+# go over each trial, 216 trials in total
+for (i in 1:n_obs18){
+    # decision 
+    if (session[[18]]$contrast_left[i] > session[[18]]$contrast_right[i]){
+        dat18$decision[i] = '1' 
+    } else if (session[[18]]$contrast_left[i] < session[[18]]$contrast_right[i]){
+        dat18$decision[i] = '2' 
+    } else if (session[[18]]$contrast_left[i] == session[[18]]$contrast_right[i] 
+               & session[[18]]$contrast_left[i] == 0){
+        dat18$decision[i] = '3' 
+    } else{
+        dat18$decision[i] = '4' 
+    }
+    
+    # avg_spks
+    spks.trial = session[[18]]$spks[[i]]
+    total.spikes = apply(spks.trial, 1, sum)
+    dat18$avg_spikes[i] = mean(total.spikes)
+}
+
+dat18$decision = as.factor(dat18$decision)
+summary(dat18)
+```
+
+# Section 4: Model Training and Prediction
+
+Finally, we will build a prediction model to predict the outcome (i.e., feedback types). The performance will be evaluated on two test sets of 100 trials randomly selected from Session 1 and Session 18, respectively. 
+
+### Session 1
+First, we focus on Session 1 and do model training and prediction. We use `sample` function to take 80% samples from `dat1` without replacement as training data, and take the rest as testing data.
+```{r}
+# Split data into train and test
+set.seed(101)
+sample1 <- sample.int(n = n_obs1, size = floor(.8 * n_obs1), replace = F) # 80% data for training
+train1 <- dat1[sample1, ]
+test1  <- dat1[-sample1, ]
+```
+
+```{r}
+# Fitting Generalized Linear Models using all variables in the train dataset
+fit1 <- glm(feedback_type~., data = train1, family="binomial")
+summary(fit1)
+# plot(fit1)
+```
+
+For simplicity, we fit a logistic regression to do the prediction.
+```{r}
+# use the linear model to predict feedback type in the `test` dataset, 23 observations in `test`
+
+# output probabilities of P(Y = 1|X)
+pred1 <- predict(fit1, test1 %>% select(-feedback_type), type = 'response')
+# convert predicted probabilities to feedback types: success(1) if > 0.5, fail(-1) otherwise
+prediction1 <- factor(pred1 > 0.5, labels = c('-1', '1'))
+mean(prediction1 != test1$feedback_type) # mean value of predictions not matching test data
+```
+
+The prediction error on the test data set is about 26%.
+
+```{r}
+cm1 <- confusionMatrix(prediction1, test1$feedback_type, dnn = c("Prediction", "Reference"))
+
+plt1 <- as.data.frame(cm1$table)
+
+ggplot(plt1, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+```
+
+Correctly predict 1 as 1: 13, falsely predict -1(true) as 1(predict): 3, falsely predict 1(true) as -1(predict): 3, correctly predict -1 as -1: 4.
+
+### Session 18
+Now we focus on Session 18 and do model training and prediction. We use `sample` function to take 80% samples from `dat18` without replacement as training data, and take the rest as testing data.
+```{r}
+# Split data into train and test
+set.seed(101)
+sample18 <- sample.int(n = n_obs18, size = floor(.8 * n_obs18), replace = F) # 80% data for training
+train18 <- dat18[sample18, ]
+test18  <- dat18[-sample18, ]
+```
+
+```{r}
+# Fitting Generalized Linear Models using all variables in the train dataset
+fit18 <- glm(feedback_type~., data = train18, family="binomial")
+summary(fit18)
+# plot(fit18)
+```
+
+For simplicity, we fit a logistic regression to do the prediction.
+```{r}
+# use the linear model to predict feedback type in the `test` dataset, 44 observations in `test`
+
+# output probabilities of P(Y = 1|X)
+pred18 <- predict(fit18, test18 %>% select(-feedback_type), type = 'response')
+# convert predicted probabilities to feedback types: success(1) if > 0.5, fail(-1) otherwise
+prediction18 <- factor(pred18 > 0.5, labels = c('-1', '1'))
+mean(prediction18 != test18$feedback_type) # mean value of predictions not matching test data
+```
+
+The prediction error on the test data set is about 22.7%.
+
+```{r}
+cm18 <- confusionMatrix(prediction18, test18$feedback_type, dnn = c("Prediction", "Reference"))
+
+plt18 <- as.data.frame(cm18$table)
+
+ggplot(plt18, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+```
+
+Correctly predict 1 as 1: 33, falsely predict -1(true) as 1(predict): 9, falsely predict 1(true) as -1(predict): 1, correctly predict -1 as -1: 1.
+
+# Section 5: Prediction Performance on the Test Sets
+
+In this section we evaluate the prediction performance of our model on the given test sets. test1 comes from Session 1 and test2 comes from Session 18. 
+
+```{r echo=TRUE, eval=TRUE}
+test.data=list()
+for(i in 1:2){
+  test.data[[i]]=readRDS(paste('./test/test',i,'.rds',sep=''))
+}
+```
+
+First, we create a table `tst1` for test sets from Session 1. Each row contains feedback type, decision indicator, and average spikes in a trial, and there are 114 rows in total. The summary of the table `tst1` is shown below.
+
+```{r}
+# In session 1, apply benchmark method 1
+n_tst1 = length(test.data[[1]]$feedback_type) # number of trials in session 1
+
+tst1 = tibble(
+    feedback_type = as.factor(test.data[[1]]$feedback_type),
+    decision = rep('name', n_tst1),
+    avg_spikes = rep(0, n_tst1)
+)
+
+# go over each trial, 114 trials in total
+for (i in 1:n_tst1){
+    # decision 
+    if (test.data[[1]]$contrast_left[i] > test.data[[1]]$contrast_right[i]){
+        tst1$decision[i] = '1' 
+    } else if (test.data[[1]]$contrast_left[i] < test.data[[1]]$contrast_right[i]){
+        tst1$decision[i] = '2' 
+    } else if (test.data[[1]]$contrast_left[i] == test.data[[1]]$contrast_right[i] 
+               & test.data[[1]]$contrast_left[i] == 0){
+        tst1$decision[i] = '3' 
+    } else{
+        tst1$decision[i] = '4' 
+    }
+    
+    # avg_spks
+    spks.trial = test.data[[1]]$spks[[i]]
+    total.spikes = apply(spks.trial, 1, sum) # summation of spikes for each neuron
+    tst1$avg_spikes[i] = mean(total.spikes)
+}
+
+tst1$decision = as.factor(tst1$decision)
+summary(tst1)
+```
+
+Then, we do the same thing for the test set from Session 18. The summary of feedback type, decision indicator, and average spikes in this dataset is shown below.
+
+```{r}
+n_tst18 = length(test.data[[2]]$feedback_type) # number of trials in session 1
+
+tst18 = tibble(
+    feedback_type = as.factor(test.data[[2]]$feedback_type),
+    decision = rep('name', n_tst18),
+    avg_spikes = rep(0, n_tst18)
+)
+
+# go over each trial, 114 trials in total
+for (i in 1:n_tst18){
+    # decision 
+    if (test.data[[2]]$contrast_left[i] > test.data[[2]]$contrast_right[i]){
+        tst18$decision[i] = '1' 
+    } else if (test.data[[2]]$contrast_left[i] < test.data[[2]]$contrast_right[i]){
+        tst18$decision[i] = '2' 
+    } else if (test.data[[2]]$contrast_left[i] == test.data[[2]]$contrast_right[i] 
+               & test.data[[2]]$contrast_left[i] == 0){
+        tst18$decision[i] = '3' 
+    } else{
+        tst18$decision[i] = '4' 
+    }
+    
+    # avg_spks
+    spks.trial = test.data[[2]]$spks[[i]]
+    total.spikes = apply(spks.trial, 1, sum) # summation of spikes for each neuron
+    tst18$avg_spikes[i] = mean(total.spikes)
+}
+
+tst18$decision = as.factor(tst18$decision)
+summary(tst18)
+```
+### Prediction model 1 on test set 1
+
+To predict feedback type in test set 1, we use the prediction model `fit1` trained by data in Session 1.
+
+```{r}
+# use the linear model to predict feedback type in the `test` dataset, 100 observations in `test`
+
+# output probabilities of P(Y = 1|X)
+pred.test1 <- predict(fit1, tst1 %>% select(-feedback_type), type = 'response')
+# convert predicted probabilities to feedback types: success(1) if > 0.5, fail(-1) otherwise
+prediction.test1 <- factor(pred.test1 > 0.5, labels = c('-1', '1'))
+mean(prediction.test1 != tst1$feedback_type) # mean value of predictions not matching test data
+```
+
+The prediction error on the test data set is 27%.
+
+```{r}
+cm.test1 <- confusionMatrix(prediction.test1, tst1$feedback_type, dnn = c("Prediction", "Reference"))
+
+plt.test1 <- as.data.frame(cm.test1$table)
+
+ggplot(plt.test1, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+```
+
+Correctly predict 1 as 1: 54, falsely predict -1(true) as 1(predict): 9, falsely predict 1(true) as -1(predict): 18, correctly predict -1 as -1: 19.
+
+### Prediction model 18 on test set 18
+
+To predict feedback type in test set 18, we use the prediction model `fit18` trained by data in Session 18.
+
+```{r}
+# use the linear model to predict feedback type in the `test` dataset, 100 observations in `test`
+
+# output probabilities of P(Y = 1|X)
+pred.test18 <- predict(fit18, tst18 %>% select(-feedback_type), type = 'response')
+# convert predicted probabilities to feedback types: success(1) if > 0.5, fail(-1) otherwise
+prediction.test18 <- factor(pred.test18 > 0.5, labels = c('-1', '1'))
+mean(prediction.test18 != tst18$feedback_type) # mean value of predictions not matching test data
+```
+
+The prediction error on the test data set is 26%.
+
+```{r}
+cm.test18 <- confusionMatrix(prediction.test18, tst18$feedback_type, dnn = c("Prediction", "Reference"))
+
+plt.test18 <- as.data.frame(cm.test18$table)
+
+ggplot(plt.test18, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+```
+
+Correctly predict 1 as 1: 70, falsely predict -1(true) as 1(predict): 23, falsely predict 1(true) as -1(predict): 3, correctly predict -1 as -1: 4.
+
+# Section 6: Discussion
+
+In this project, we select the dataset from a single session for training based on the derivation of test sets. For example, to predict the test set from Session 1, we use the prediction model trained on the dataset from Session 1. An ideal prediction model should have 20% or less prediction error. Therefore, our prediction model is not ideal enough. This is because the sample size in a single session is not big enough that the prediction error may be large. 
+
+Therefore, we may probably use more sessions' data select the ones with the least prediction error, which can improve our prediction model. However, this improvement may be risky because of the different data structures between sessions, which may cause larger prediction error. Therefore, we still use data from single session for prediction because the prediction error that slightly over 20% is acceptable.
+
+# Reference {-}
+
+
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x
+
+# Acknowledgement
+
+Project Consulting Sessions, Project Demos.
+
